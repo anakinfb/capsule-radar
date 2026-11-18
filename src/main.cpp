@@ -28,6 +28,8 @@
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
+#include "net_fetch.h"               // IP geolocation at boot
+#include <ArduinoJson.h>
 #include "alert_memory.h"            // which aircraft the alerts have seen, and when
 #include <string>
 #include <WiFiManager.h>             // captive portal
@@ -298,11 +300,34 @@ static void adsb_task(void*) {
     }
 }
 
+static bool g_homeSaved = false;   // a centre was saved on the web page -> never override it
+
+// No saved centre: take a rough one from the public IP (city-level, can be tens of km off).
+// Not saved to NVS, so a centre set later on the web page always wins.
+static void ipGeolocate() {
+    uint8_t *buf = nullptr; size_t len = 0;
+    if (!net_fetch_psram(IP_GEO_URL, ADSB_USER_AGENT, &buf, &len, 1024, 5000, 8000)) {
+        Serial.println("[geo] IP geolocation failed; using the default centre");
+        return;
+    }
+    JsonDocument doc;
+    const bool ok = !deserializeJson(doc, (const char *)buf, len) && doc["success"] == true;
+    heap_caps_free(buf);
+    const double lat = doc["latitude"] | NAN, lon = doc["longitude"] | NAN;
+    if (!ok || !(lat >= -90 && lat <= 90) || !(lon >= -180 && lon <= 180)) {
+        Serial.println("[geo] IP geolocation: bad reply; using the default centre");
+        return;
+    }
+    g_settings.homeLat = lat; g_settings.homeLon = lon;
+    Serial.printf("[geo] centre from IP: %.4f, %.4f\n", lat, lon);
+}
+
 static void loadSettings() {
     Preferences p;
     p.begin("capsuleradar", true);
     g_settings.homeLat = p.getDouble("homeLat", HOME_LAT_DEFAULT);
     g_settings.homeLon = p.getDouble("homeLon", HOME_LON_DEFAULT);
+    g_homeSaved        = p.isKey("homeLat");
     // Repair a value that can't work: an old install may hold the 250 km the web page once
     // offered (clamped to 150) or even 0 (divides by zero in geo::projectToScreen).
     g_settings.rangeKm = repairRangeKm(p.getFloat("rangeKm", RANGE_KM_DEFAULT));
@@ -1263,6 +1288,9 @@ void setup() {
     loadSettings();
     route_cache_begin();   // clear stale route cache if the label format changed
 
+#if defined(BOARD_STOPWATCH)
+    board_power_begin();   // panel/touch power + reset live on the PMIC/expander, not GPIOs
+#endif
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.
     // The panel is powered from the always-on DC1 rail, so it lights without the
@@ -1375,9 +1403,14 @@ void setup() {
     wifi_prefer_strongest_ap();
     if (g_wm.autoConnect("CapsuleRadar-Setup")) {
         Serial.println("[wifi] connected");
+        if (!g_homeSaved) ipGeolocate();
     } else {
         Serial.println("[wifi] config portal open - join 'CapsuleRadar-Setup' to set WiFi; UI stays live");
         g_bootedIntoPortal = true;   // saved WiFi may just not be up yet (car hotspot) -> loop() retries it
+        // Left on, auto-reconnect keeps the STA scanning for the saved network non-stop, hopping
+        // the portal off its channel so phones never see it. loop() retries in short attempts instead.
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect(false, false);
     }
 
     // --- OTA ---------------------------------------------------------------
@@ -1479,13 +1512,25 @@ void loop() {
     // reboot: WiFiManager's portal server doesn't hand port 80 / mDNS over cleanly).
     if (g_bootedIntoPortal && !g_rebootAtMs) {
         static uint32_t lastRetry = 0;
+        static bool attempting = false;
+        // Each WiFi.begin() scans every channel, taking the portal off the air for a moment:
+        // never do it while a phone is on the portal.
+        static int lastClients = -1;
+        const int clients = WiFi.softAPgetStationNum();
+        if (clients != lastClients) { Serial.printf("[wifi] portal clients: %d\n", clients); lastClients = clients; }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("[wifi] saved network appeared -> restarting for a clean start");
             g_rebootAtMs = millis() + 800;
-        } else if (millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
+        } else if (clients == 0 && millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
             lastRetry = millis();
+            attempting = true;
             Serial.println("[wifi] retrying saved network in the background...");
             WiFi.begin();                     // uses the stored credentials
+        } else if (attempting && millis() - lastRetry > 6000UL) {
+            // An unanswered begin() keeps the STA scanning forever, hopping the portal's channel
+            // so phones never see it. End each attempt, keeping the saved credentials.
+            attempting = false;
+            WiFi.disconnect(false, false);
         }
     }
 

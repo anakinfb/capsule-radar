@@ -3,10 +3,12 @@
 
 #define FW_VERSION "1.9.0"   // shown on the web config page + Stats screen; bump on release
 
-// ---------- Home location (default: Dénia, Spain) ----------
-// Overridable at runtime via the captive portal (stored in NVS).
-#define HOME_LAT_DEFAULT   38.8409
-#define HOME_LON_DEFAULT    0.1059
+// ---------- Home location (default: San Giorgio Monferrato, Italy) ----------
+// Overridable on the web page (stored in NVS). With nothing saved, the boot tries an IP
+// geolocation first (main.cpp ipGeolocate) and falls back to this.
+#define HOME_LAT_DEFAULT   45.08
+#define HOME_LON_DEFAULT    8.43
+#define IP_GEO_URL         "https://ipwho.is/?fields=success,latitude,longitude"
 
 // ---------- Radar ----------
 #define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see below.
@@ -188,6 +190,7 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 // default so an unflagged build behaves exactly as before.
 //   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
+//   -DBOARD_STOPWATCH   -> M5Stack StopWatch (C152)
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
@@ -195,6 +198,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #  include "boards/board_lcd_21.h"
 #elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
+#elif defined(BOARD_STOPWATCH)
+#  include "boards/board_stopwatch.h"
 #else
 #  include "boards/board_amoled_175.h"
 #endif
@@ -209,6 +214,10 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #endif
 
 // An on/off buzzer instead of a codec (the LCD 2.1): see audio.cpp.
+#ifndef BOARD_HAS_RTC
+#define BOARD_HAS_RTC 1
+#endif
+
 #ifndef BOARD_HAS_BUZZER
 #define BOARD_HAS_BUZZER 0
 #endif
