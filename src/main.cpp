@@ -852,7 +852,11 @@ static void handleRoot() {
         "<button type=button class=sec onclick='t()'>Test ping</button></div>"
         "<div class=card><div class=t>Network</div>"
         "<label>Saved networks</label>%s"
-        "<p style='color:#9affc8;font-size:13px;margin:8px 0 4px'>To add one, join it from the setup portal: every network the radar joins is kept (up to 5) and the strongest in range is used. Reset WiFi forgets them all and reopens the portal.</p>"
+        "<form method=POST action=/wifiadd style='margin:8px 0'>"
+        "<input name=ssid maxlength=32 placeholder='Network name (SSID)' required autocapitalize=off autocomplete=off>"
+        "<input name=pass type=password maxlength=63 placeholder='Password (empty if open)' autocomplete=new-password>"
+        "<button class=sec>Add network</button></form>"
+        "<p style='color:#9affc8;font-size:13px;margin:8px 0 4px'>Up to 5 are kept; the strongest in range is used at boot. Networks joined from the setup portal are added too. Reset WiFi forgets them all and reopens the portal.</p>"
         "<form method=POST action=/wifi onsubmit=\"return confirm('Forget every saved WiFi network and reopen the setup portal?')\"><button class=w>Reset WiFi</button></form></div>"
         "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; <a href=/update style='color:#9affc8'>Firmware update</a> &middot; v" FW_VERSION "</p>"
         "<script>"
@@ -957,6 +961,26 @@ static void handleSave() {
         "font-family:sans-serif;padding:24px'>Saved. Restarting&hellip;</body>");
     delay(400);
     ESP.restart();
+}
+
+static void handleWifiAdd() {   // POST /wifiadd (ssid, pass): save a network without the portal
+    if (refuseIfCrossSite()) return;
+    const String ssid = g_web.arg("ssid"), pass = g_web.arg("pass");
+    // 802.11 limits: SSID 1..32 bytes; WPA passphrase 8..63 characters, or none (open network)
+    if (ssid.isEmpty() || ssid.length() > 32) { g_web.send(400, "text/plain", "network name must be 1-32 characters"); return; }
+    if (!pass.isEmpty() && (pass.length() < 8 || pass.length() > 63)) { g_web.send(400, "text/plain", "password must be 8-63 characters (or empty for an open network)"); return; }
+    SavedNet nets[WIFI_SAVED_MAX];
+    int n = wifi_saved_load(nets), i = 0;
+    while (i < n && nets[i].ssid != ssid) ++i;                 // same name: update its password
+    if (i == n) {
+        if (n == WIFI_SAVED_MAX) { g_web.send(400, "text/plain", "5 networks saved already: forget one first"); return; }
+        ++n;
+    }
+    nets[i] = { ssid, pass };
+    wifi_saved_store(nets, n);
+    Serial.printf("[wifi] added '%s' from the web page (%d saved)\n", ssid.c_str(), n);
+    g_web.sendHeader("Location", "/");
+    g_web.send(303);
 }
 
 static void handleWifiForget() {   // POST /wififorget?i=N: drop one saved network
@@ -1533,6 +1557,7 @@ void setup() {
     g_web.on("/save", HTTP_POST, handleSave);
     g_web.on("/wifi", HTTP_POST, handleWifi);
     g_web.on("/wififorget", HTTP_POST, handleWifiForget);
+    g_web.on("/wifiadd", HTTP_POST, handleWifiAdd);
     g_web.on("/bright", handleBright);
     g_web.on("/vol", handleVol);
     g_web.on("/alerts", handleAlerts);
