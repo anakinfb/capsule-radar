@@ -50,7 +50,7 @@
 #define I2C_ADDR_IMU        0x68           // BMI270; imu_qmi8658 finds no QMI8658 and stays off
 #define I2C_ADDR_RTC        0x32           // RX8130CE; unused (BOARD_HAS_RTC 0)
 
-#define PIN_BOOT_BUTTON     2              // button A
-#define PIN_BUTTON_B        1
+#define PIN_KEY_A           2              // active low; radar: next zoom step
+#define PIN_KEY_B           1              // active low; radar: next theme
 
 void board_power_begin();                  // PM1 rails + IOE1 panel/touch reset (board_stopwatch.cpp)

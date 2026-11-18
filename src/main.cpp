@@ -1506,6 +1506,23 @@ void loop() {
         battery_power_off();
     }
 
+#if defined(PIN_KEY_A)
+    {   // hardware keys (active low): act on the press edge, 30 ms debounce
+        static const uint8_t pins[2] = { PIN_KEY_A, PIN_KEY_B };
+        static bool down[2];
+        static uint32_t since[2];
+        static bool init = false;
+        if (!init) { for (int i = 0; i < 2; ++i) pinMode(pins[i], INPUT_PULLUP); init = true; }
+        for (int i = 0; i < 2; ++i) {
+            const bool now = digitalRead(pins[i]) == LOW;
+            if (now == down[i]) { since[i] = millis(); continue; }
+            if (millis() - since[i] < 30) continue;
+            down[i] = now;
+            if (now) ui_key(i, g_idle);
+        }
+    }
+#endif
+
     // Car use: the saved WiFi often appears 30-60 s AFTER boot (vehicle hotspot). If we booted
     // into the portal despite having saved credentials, keep retrying them in the background;
     // once the network shows up, reboot for a clean start (same rationale as the post-config
