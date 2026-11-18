@@ -52,7 +52,7 @@ void battery_power_off() {
     PMU.shutdown();
 }
 
-#else   // !BOARD_HAS_PMIC
+#elif !defined(BOARD_STOPWATCH)   // StopWatch: M5PM1 readout in board_stopwatch.cpp
 
 bool battery_begin()   { Serial.println("[batt] no PMIC on this board"); return false; }
 bool battery_present() { return false; }
@@ -62,4 +62,4 @@ bool battery_vbus_in() { return false; }
 void battery_enable_codec_rail() {}
 void battery_power_off() {}
 
-#endif  // BOARD_HAS_PMIC
+#endif  // BOARD_HAS_PMIC / BOARD_STOPWATCH

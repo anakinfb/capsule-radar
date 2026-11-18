@@ -42,7 +42,13 @@
 #define TP_MIRROR_Y         false
 
 // ---------- Peripherals ----------
-// Battery (M5PM1), audio (ES8311), IMU (BMI270, not the QMI8658 the driver probes) and
+// Battery: read from the M5PM1 in board_stopwatch.cpp (BOARD_HAS_PMIC stays 0, which means
+// "AXP2101" to the rest of the code, e.g. the power-off paths). Charging is held between
+// BATT_CHARGE_ON_PCT and BATT_CHARGE_OFF_PCT to spare a battery that lives on USB: CHG_EN
+// (PM1 0x06 bit 0) does gate the charger, checked on hardware against CHG_STAT (PM1 GPIO2).
+#define BATT_CHARGE_ON_PCT  30
+#define BATT_CHARGE_OFF_PCT 80
+// Audio (ES8311), IMU (BMI270, not the QMI8658 the driver probes) and
 // RTC (RX8130CE, not a PCF85063) are not driven: the firmware runs without them.
 #define BOARD_HAS_PMIC      0
 #define BOARD_HAS_AUDIO     0
