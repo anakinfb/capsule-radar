@@ -530,6 +530,72 @@ static bool requestCrossSite() {
 }
 
 // First line of every state-changing POST handler: rejects (and answers 403) or passes.
+// ---------- Saved WiFi networks ----------
+// The driver keeps one network; this list (NVS "wifinets", newest first) keeps every network
+// the device has joined, so it moves between home, a phone hotspot, the office...
+#define WIFI_SAVED_MAX 5
+struct SavedNet { String ssid, pass; };
+
+static int wifi_saved_load(SavedNet *out) {
+    Preferences p;
+    p.begin("wifinets", true);
+    const int n = constrain(p.getInt("n", 0), 0, WIFI_SAVED_MAX);
+    for (int i = 0; i < n; ++i) {
+        char k[4];
+        snprintf(k, sizeof(k), "s%d", i); out[i].ssid = p.getString(k, "");
+        snprintf(k, sizeof(k), "p%d", i); out[i].pass = p.getString(k, "");
+    }
+    p.end();
+    return n;
+}
+
+static void wifi_saved_store(const SavedNet *nets, int n) {
+    Preferences p;
+    p.begin("wifinets", false);
+    p.clear();
+    p.putInt("n", n);
+    for (int i = 0; i < n; ++i) {
+        char k[4];
+        snprintf(k, sizeof(k), "s%d", i); p.putString(k, nets[i].ssid);
+        snprintf(k, sizeof(k), "p%d", i); p.putString(k, nets[i].pass);
+    }
+    p.end();
+}
+
+// The network we are on goes to the front of the list (new, or with a changed password).
+static void wifi_remember_current() {
+    const String ssid = WiFi.SSID(), pass = WiFi.psk();
+    if (ssid.isEmpty()) return;
+    SavedNet nets[WIFI_SAVED_MAX + 1];
+    const int n = wifi_saved_load(nets + 1);
+    nets[0] = { ssid, pass };
+    int out = 1;
+    for (int i = 1; i <= n && out < WIFI_SAVED_MAX; ++i)
+        if (nets[i].ssid != ssid) nets[out++] = nets[i];
+    if (n > 0 && nets[1].ssid == ssid && nets[1].pass == pass) return;   // already first: no flash write
+    wifi_saved_store(nets, out);
+    Serial.printf("[wifi] remembered '%s' (%d saved)\n", ssid.c_str(), out);
+}
+
+// Join the strongest saved network in range. Before WiFiManager, which only knows the last one.
+static bool wifi_join_known() {
+    SavedNet nets[WIFI_SAVED_MAX];
+    const int n = wifi_saved_load(nets);
+    if (n == 0) return false;
+    WiFi.mode(WIFI_STA);
+    const int found = WiFi.scanNetworks();
+    int best = -1, bestRssi = -1000;
+    for (int a = 0; a < found; ++a)
+        for (int i = 0; i < n; ++i)
+            if (WiFi.SSID(a) == nets[i].ssid && WiFi.RSSI(a) > bestRssi) { best = i; bestRssi = WiFi.RSSI(a); }
+    WiFi.scanDelete();
+    if (best < 0) { Serial.printf("[wifi] none of the %d saved networks in range\n", n); return false; }
+    Serial.printf("[wifi] joining saved '%s' (%d dBm)\n", nets[best].ssid.c_str(), bestRssi);
+    WiFi.begin(nets[best].ssid.c_str(), nets[best].pass.c_str());
+    for (uint32_t t0 = millis(); WiFi.status() != WL_CONNECTED && millis() - t0 < 10000; ) delay(100);
+    return WiFi.status() == WL_CONNECTED;
+}
+
 static bool refuseIfCrossSite() {
     if (!requestCrossSite()) return false;
     g_web.send(403, "text/plain", "cross-site request rejected");
@@ -683,6 +749,26 @@ static void handleRoot() {
                  i, TZOPTS[i].offMin, TZOPTS[i].dst, g_tz == TZOPTS[i].tz ? " selected" : "", TZOPTS[i].label);
         tzopts += o;
     }
+    String netRows;   // saved WiFi networks; the one in use has no Forget button
+    {
+        SavedNet nets[WIFI_SAVED_MAX];
+        const int n = wifi_saved_load(nets);
+        const String cur = WiFi.SSID();
+        for (int i = 0; i < n; ++i) {
+            String name;   // SSIDs are arbitrary bytes: escape before they go into the page
+            for (char c : nets[i].ssid) {
+                if (c == '<') name += "&lt;"; else if (c == '>') name += "&gt;";
+                else if (c == '&') name += "&amp;"; else if (c == '"') name += "&quot;"; else if (c == '\'') name += "&#39;";
+                else name += c;
+            }
+            netRows += "<div style='display:flex;align-items:center;gap:8px;margin:4px 0'><span style='flex:1'>" + name + "</span>";
+            if (nets[i].ssid == cur) netRows += "<span style='font-size:12px;opacity:.6'>in use</span>";
+            else netRows += "<form method=POST action='/wififorget?i=" + String(i) + "' style='margin:0'>"
+                            "<button class=sec style='margin:0;padding:4px 10px'>Forget</button></form>";
+            netRows += "</div>";
+        }
+        if (n == 0) netRows = "<div style='font-size:13px;opacity:.6'>None yet</div>";
+    }
     String gpsRow;   // only on the -G variant: offer to auto-set the centre from GPS
     if (gps_present()) {
         gpsRow  = "<label><input type=checkbox class=ck ";
@@ -765,8 +851,9 @@ static void handleRoot() {
         "<label>Proximity alert</label><select onchange='px(this.value)'>%s</select>"
         "<button type=button class=sec onclick='t()'>Test ping</button></div>"
         "<div class=card><div class=t>Network</div>"
-        "<p style='color:#9affc8;font-size:13px;margin:0 0 4px'>Forget the saved WiFi and reopen the setup portal.</p>"
-        "<form method=POST action=/wifi onsubmit=\"return confirm('Forget the saved WiFi and reopen the setup portal?')\"><button class=w>Reset WiFi</button></form></div>"
+        "<label>Saved networks</label>%s"
+        "<p style='color:#9affc8;font-size:13px;margin:8px 0 4px'>To add one, join it from the setup portal: every network the radar joins is kept (up to 5) and the strongest in range is used. Reset WiFi forgets them all and reopens the portal.</p>"
+        "<form method=POST action=/wifi onsubmit=\"return confirm('Forget every saved WiFi network and reopen the setup portal?')\"><button class=w>Reset WiFi</button></form></div>"
         "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; <a href=/update style='color:#9affc8'>Firmware update</a> &middot; v" FW_VERSION "</p>"
         "<script>"
         "var C=[%.5f,%.5f];var MAP=L.map('map').setView(C,10);"
@@ -820,7 +907,7 @@ static void handleRoot() {
         g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(), tuopts.c_str(),
-        g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
+        g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(), netRows.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     if (len >= (int)BUFSZ)   // truncated page = broken <script>; make it loud, not silent
         Serial.printf("[web] config page truncated: %d bytes > %u buffer\n", len, (unsigned)BUFSZ);
@@ -872,6 +959,20 @@ static void handleSave() {
     ESP.restart();
 }
 
+static void handleWifiForget() {   // POST /wififorget?i=N: drop one saved network
+    if (refuseIfCrossSite()) return;
+    SavedNet nets[WIFI_SAVED_MAX];
+    int n = wifi_saved_load(nets);
+    const int i = g_web.hasArg("i") ? g_web.arg("i").toInt() : -1;
+    // the network in use stays: forgetting it here would not stick (the driver keeps it too)
+    if (i < 0 || i >= n || nets[i].ssid == WiFi.SSID()) { g_web.send(400, "text/plain", "cannot forget that network"); return; }
+    Serial.printf("[wifi] forgot '%s'\n", nets[i].ssid.c_str());
+    for (int k = i; k < n - 1; ++k) nets[k] = nets[k + 1];
+    wifi_saved_store(nets, n - 1);
+    g_web.sendHeader("Location", "/");
+    g_web.send(303);
+}
+
 static void handleWifi() {
     if (refuseIfCrossSite()) return;
     g_web.send(200, "text/html",
@@ -888,6 +989,7 @@ static void handleWifi() {
     // core 3.x both wm.resetSettings() and WiFi.disconnect(true,true) can silently no-op
     // (they fail once the driver is off), so v1.3.19's reset still reconnected. Erasing that
     // namespace directly is unconditional — it works whatever state the WiFi driver is in.
+    wifi_saved_store(nullptr, 0);   // every saved network, not just the driver's one
     g_wm.resetSettings();           // best-effort driver-level erase first...
     WiFi.disconnect(false, true);   // ...keep WiFi up so the erase can actually run
     delay(100);
@@ -1401,8 +1503,10 @@ void setup() {
         g_rebootAtMs = millis() + 2500;   // let the portal deliver its 'saved' page first
     });
     wifi_prefer_strongest_ap();
+    wifi_join_known();   // if this connects, autoConnect() below just sees "already connected"
     if (g_wm.autoConnect("CapsuleRadar-Setup")) {
         Serial.println("[wifi] connected");
+        wifi_remember_current();
         if (!g_homeSaved) ipGeolocate();
     } else {
         Serial.println("[wifi] config portal open - join 'CapsuleRadar-Setup' to set WiFi; UI stays live");
@@ -1428,6 +1532,7 @@ void setup() {
     g_web.on("/", handleRoot);
     g_web.on("/save", HTTP_POST, handleSave);
     g_web.on("/wifi", HTTP_POST, handleWifi);
+    g_web.on("/wififorget", HTTP_POST, handleWifiForget);
     g_web.on("/bright", handleBright);
     g_web.on("/vol", handleVol);
     g_web.on("/alerts", handleAlerts);
@@ -1538,11 +1643,22 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("[wifi] saved network appeared -> restarting for a clean start");
             g_rebootAtMs = millis() + 800;
-        } else if (clients == 0 && millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
+        } else if (clients == 0 && millis() - lastRetry > 20000UL) {
+            // one saved network per attempt, in turn (the driver's own one if the list is empty)
+            static int next = 0;
+            SavedNet nets[WIFI_SAVED_MAX];
+            const int n = wifi_saved_load(nets);
             lastRetry = millis();
-            attempting = true;
-            Serial.println("[wifi] retrying saved network in the background...");
-            WiFi.begin();                     // uses the stored credentials
+            if (n > 0) {
+                const SavedNet &w = nets[next++ % n];
+                attempting = true;
+                Serial.printf("[wifi] retrying '%s' in the background...\n", w.ssid.c_str());
+                WiFi.begin(w.ssid.c_str(), w.pass.c_str());
+            } else if (g_wm.getWiFiIsSaved()) {
+                attempting = true;
+                Serial.println("[wifi] retrying saved network in the background...");
+                WiFi.begin();                 // uses the stored credentials
+            }
         } else if (attempting && millis() - lastRetry > 6000UL) {
             // An unanswered begin() keeps the STA scanning forever, hopping the portal's channel
             // so phones never see it. End each attempt, keeping the saved credentials.
